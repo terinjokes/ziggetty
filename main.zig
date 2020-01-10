@@ -3,12 +3,11 @@
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const net = std.net;
 const os = std.os;
 const fs = std.fs;
 const heap = std.heap;
-
-const SYS_sendfile = 40;
 
 pub fn main() !void {
     var act = os.Sigaction{
@@ -42,9 +41,12 @@ pub fn main() !void {
                     "HTTP/1.1 200 OK\r\nServer: ziggetty\r\nConnection: closed\r\nContent-Length: {}\r\n\r\n",
                     .{stat.size},
                 ) catch unreachable;
-
+                errdefer allocator.free(hdr);
                 try conn.file.write(hdr);
-                _ = sendfile(conn.file.handle, f.handle, 0, stat.size);
+
+                // TODO: remove this cast
+                const size = @intCast(usize, stat.size);
+                const sent = try sendfile(conn.file.handle, f.handle, null, size);
                 conn.file.close();
                 os.exit(0);
             },
@@ -55,18 +57,50 @@ pub fn main() !void {
     }
 }
 
-fn sendfile(outfd: i32, infd: i32, offset: u64, count: usize) usize {
-    return syscall4(SYS_sendfile, @bitCast(usize, @as(isize, outfd)), @bitCast(usize, @as(isize, infd)), offset, count);
+const SendFileError = error{
+    InputOutput,
+    NoMem,
+    Overflow,
+    Unseekable,
+    WouldBlock,
+} || os.UnexpectedError;
+
+fn sendfile(outfd: os.fd_t, infd: os.fd_t, offset: ?*u64, count: usize) SendFileError!usize {
+    while (true) {
+        var rc: usize = undefined;
+        var err: usize = undefined;
+        if (builtin.os == .linux) {
+            rc = _sendfile(outfd, infd, offset, count);
+            err = os.errno(rc);
+        } else {
+            @compileError("sendfile unimplemented for this target");
+        }
+
+        switch (err) {
+            0 => return @intCast(usize, rc),
+            else => return os.unexpectedErrno(err),
+
+            os.EBADF => unreachable,
+            os.EINVAL => unreachable,
+            os.EFAULT => unreachable,
+            os.EAGAIN => if (std.event.Loop.instance) |loop| {
+                loop.waitUntilFdWritable(outfd);
+                continue;
+            } else {
+                return error.WouldBlock;
+            },
+            os.EIO => return error.InputOutput,
+            os.ENOMEM => return error.NoMem,
+            os.EOVERFLOW => return error.Overflow,
+            os.ESPIPE => return error.Unseekable,
+        }
+    }
 }
 
-fn syscall4(number: usize, arg1: usize, arg2: usize, arg3: usize, arg4: usize) usize {
-    return asm volatile ("syscall"
-        : [ret] "={rax}" (-> usize)
-        : [number] "{rax}" (number),
-          [arg1] "{rdi}" (arg1),
-          [arg2] "{rsi}" (arg2),
-          [arg3] "{rdx}" (arg3),
-          [arg4] "{r10}" (arg4)
-        : "rcx", "r11", "memory"
-    );
+fn _sendfile(outfd: i32, infd: i32, offset: ?*u64, count: usize) usize {
+    if (@hasDecl(os, "SYS_sendfile64")) {
+        return std.os.linux.syscall4(os.SYS_sendfile64, @bitCast(usize, @as(isize, outfd)), @bitCast(usize, @as(isize, infd)), @ptrToInt(offset), count);
+    } else {
+        return std.os.linux.syscall4(os.SYS_sendfile, @bitCast(usize, @as(isize, outfd)), @bitCast(usize, @as(isize, infd)), @ptrToInt(offset), count);
+    }
 }
