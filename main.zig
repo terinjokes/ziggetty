@@ -1,3 +1,5 @@
+// Copyright (c) 2020, Terin Stock
+//
 // This Source Code Form is subject to the terms of the Mozilla Public
 // License, v. 2.0. If a copy of the MPL was not distributed with this
 // file, You can obtain one at https://mozilla.org/MPL/2.0/.
@@ -31,17 +33,16 @@ pub fn main() !void {
         var pid = try os.fork();
         switch (pid) {
             0 => blk: {
-                var mem: [512]u8 = undefined;
-                const allocator = &heap.FixedBufferAllocator.init(mem[0..mem.len]).allocator;
+                var buf: [512]u8 = undefined;
+
                 var f = try fs.cwd().openFile("index.html", .{});
                 var stat = try f.stat();
 
-                const hdr = std.fmt.allocPrint(
-                    allocator,
+                const hdr = std.fmt.bufPrint(
+                    buf[0..buf.len],
                     "HTTP/1.1 200 OK\r\nServer: ziggetty\r\nConnection: closed\r\nContent-Length: {}\r\n\r\n",
                     .{stat.size},
                 ) catch unreachable;
-                errdefer allocator.free(hdr);
                 try conn.file.write(hdr);
 
                 // TODO: remove this cast
